@@ -110,21 +110,22 @@ def set_complex_value(attr, value):
 
 
 def _get_wrapped_read_method(attribute, read_method):
-    read_args = inspect.getargspec(read_method)
-    nb_args = len(read_args.args)
-
     green_mode = attribute.read_green_mode
-
+    if isinstance(read_method, functools.partial):
+        read_args = inspect.getargspec(read_method.func)
+        wrapped_args = len(read_method.args) + len(read_method.keywords)
+        nb_args = len(read_args.args) - wrapped_args
+    else:
+        read_args = inspect.getargspec(read_method)
+        nb_args = len(read_args.args)
     if nb_args < 2:
         if green_mode == GreenMode.Synchronous:
-            @functools.wraps(read_method)
             def read_attr(self, attr):
                 ret = read_method(self)
                 if not attr.get_value_flag() and ret is not None:
                     set_complex_value(attr, ret)
                 return ret
         else:
-            @functools.wraps(read_method)
             def read_attr(self, attr):
                 worker = get_worker()
                 ret = worker.execute(read_method, self)
@@ -135,10 +136,8 @@ def _get_wrapped_read_method(attribute, read_method):
         if green_mode == GreenMode.Synchronous:
             read_attr = read_method
         else:
-            @functools.wraps(read_method)
             def read_attr(self, attr):
                 return get_worker().execute(read_method, self, attr)
-
     return read_attr
 
 
@@ -172,14 +171,14 @@ def __patch_read_method(tango_device_klass, attribute):
 
 def _get_wrapped_write_method(attribute, write_method):
     green_mode = attribute.write_green_mode
-
-    if green_mode == GreenMode.Synchronous:
-        @functools.wraps(write_method)
+    if green_mode == GreenMode.Synchronous and \
+            not isinstance(write_method, functools.partial):
+        #@functools.wraps(write_method)
         def write_attr(self, attr):
             value = attr.get_write_value()
             return write_method(self, value)
     else:
-        @functools.wraps(write_method)
+        #@functools.wraps(write_method)
         def write_attr(self, attr):
             value = attr.get_write_value()
             return get_worker().execute(write_method, self, value)
