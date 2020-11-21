@@ -26,7 +26,7 @@ from argparse import ArgumentParser, ArgumentTypeError
 
 # Local imports
 from .server import run
-from .utils import is_non_str_seq
+from .utils import is_non_str_seq, set_test_context_tango_host_fdqn
 from . import DeviceProxy, Database, Util
 
 __all__ = ("MultiDeviceTestContext", "DeviceTestContext", "run_device_test_context")
@@ -94,6 +94,15 @@ def get_host_ip():
     # Get ip address
     ip = s.getsockname()[0]
     return ip
+
+
+def get_open_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("", 0))
+    s.listen(1)
+    port = s.getsockname()[1]
+    s.close()
+    return port
 
 
 def _device_class_from_field(field):
@@ -244,6 +253,7 @@ class MultiDeviceTestContext(object):
     """
     nodb = "dbase=no"
     command = "{0} {1} -ORBendPoint giop:tcp:{2}:{3} -file={4}"
+    enable_test_context_tango_host_override = True
 
     thread_timeout = 3.
     process_timeout = 5.
@@ -261,11 +271,10 @@ class MultiDeviceTestContext(object):
         if host is None:
             # IP address is used instead of the hostname on purpose (see #246)
             host = get_host_ip()
+        if not port:
+            port = get_open_port()
         if timeout is None:
             timeout = self.process_timeout if process else self.thread_timeout
-        # Patch bug #819
-        if process:
-            os.environ['ORBscanGranularity'] = '0'
         # Attributes
         self.db = db
         self.host = host
@@ -274,6 +283,8 @@ class MultiDeviceTestContext(object):
         self.server_name = "/".join(("dserver", server_name, instance_name))
         self.queue = multiprocessing.Queue() if process else queue.Queue()
         self._devices = {}
+        self._saved_environ = {}
+        self._process = process
 
         # Command args
         string = self.command.format(
@@ -402,6 +413,7 @@ class MultiDeviceTestContext(object):
 
     def start(self):
         """Run the server."""
+        self._set_up_environment_variables()
         self.thread.start()
         self.connect()
         return self
@@ -439,9 +451,31 @@ class MultiDeviceTestContext(object):
             self.join(self.timeout)
         finally:
             os.unlink(self.db)
+            self._restore_environment_variables()
 
     def join(self, timeout=None):
         self.thread.join(timeout)
+
+    def _set_up_environment_variables(self):
+        self._saved_environ = dict(os.environ)
+        # Patch bug #819
+        if self._process:
+            os.environ['ORBscanGranularity'] = '0'
+        if self.enable_test_context_tango_host_override:
+            form = 'tango://{0}:{1}#{2}'
+            device_server_fqdn = form.format(self.host, self.port, self.nodb)
+            set_test_context_tango_host_fdqn(device_server_fqdn)
+
+    def _restore_environment_variables(self):
+        modified_environ = dict(os.environ)
+        saved_environ = self._saved_environ
+        for key, value in modified_environ.items():
+            if key in saved_environ:
+                saved_value = saved_environ[key]
+                if value != saved_value:
+                    os.environ[key] = saved_value
+            else:
+                os.environ.pop(key)  # unset environment var
 
     def __enter__(self):
         """Enter method for context support.
